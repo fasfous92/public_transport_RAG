@@ -108,25 +108,25 @@ def extract_best_journeys(raw_data):
     if not raw_data or 'journeys' not in raw_data:
         return "No journeys found."
 
-    # # 1. Map global disruptions for quick lookup
-    # disruptions_map = {}
-    # for d in raw_data.get("disruptions", []):
-    #     for obj in d.get("impacted_objects", []):
-    #         line_id = obj.get("pt_object", {}).get("id")
-    #         msg = next((m['text'] for m in d.get('messages', []) if m.get('channel', {}).get('name') == 'titre'), "Perturbation")
-    #         disruptions_map[line_id] = {
-    #             "effect": d.get("severity", {}).get("effect"),
-    #             "message": msg
-    #         }
+    # 1. Map global disruptions for quick lookup
+    disruptions_map = {}
+    for d in raw_data.get("disruptions", []):
+        for obj in d.get("impacted_objects", []):
+            line_id = obj.get("pt_object", {}).get("id")
+            msg = next((m['text'] for m in d.get('messages', []) if m.get('channel', {}).get('name') == 'titre'), "Perturbation")
+            disruptions_map[line_id] = {
+                "effect": d.get("severity", {}).get("effect"),
+                "message": msg
+            }
 
     processed_journeys = []
 
     # 2. Process the first 3 journeys
     # (Fixed bug: changed [:0] to [:3])
     for i, journey in enumerate(raw_data['journeys'][:2]):
-        
+     
         # Calculate duration in minutes
-        duration_mins = journey.get('duration', 0)
+        duration_mins = journey.get('duration', 0)//60
         
         journey_info = [
             f"Option {i + 1}: {duration_mins} mins ({journey.get('nb_transfers', 0)} transfers)",
@@ -142,7 +142,7 @@ def extract_best_journeys(raw_data):
             if mode == "waiting":
                 continue
                 
-            step_duration = section.get('duration', 0)
+            step_duration = section.get('duration', 0)//60
             from_name = section.get("from", {}).get("name", "Origin")
             to_name = section.get("to", {}).get("name", "Dest")
 
@@ -150,15 +150,14 @@ def extract_best_journeys(raw_data):
                 info = section.get("display_informations", {})
                 line_code = info.get("code", "?")
                 direction = info.get("direction", "Unknown")
-                
-                # # Check for disruption on this specific line leg
-                # alert_msg = ""
-                # # Trying to find if this link ID is in our disruption map
-                # for link in section.get("links", []):
-                #     if link.get("id") in disruptions_map:
-                #         alert_msg = f" ⚠️ ALERT: {disruptions_map[link['id']]['message']}"
-
-                journey_info.append(f"    - Take Line {line_code} towards {direction} ({step_duration} min)")
+                line=info.get('physical_mode','line')
+                # Check for disruption on this specific line leg
+                alert_msg = ""
+                # Trying to find if this link ID is in our disruption map
+                for link in section.get("links", []):
+                    if link.get("id") in disruptions_map:
+                        alert_msg = f" ⚠️ ALERT: {disruptions_map[link['id']]['message']}"
+                journey_info.append(f"    - Take {line} {line_code} towards {direction} ({step_duration} min) : {alert_msg}")
             
             elif mode == "street_network" or mode == "walking":
                 journey_info.append(f"    - Walk from {from_name} to {to_name} ({step_duration} min)")
