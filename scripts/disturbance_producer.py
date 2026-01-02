@@ -1,99 +1,123 @@
 import json
 import os
+import time
 import requests
 from datetime import datetime
 from confluent_kafka import Producer
 
-# --- CONFIG ---
-KAFKA_SERVER = os.environ.get('KAFKA_SERVER', 'kafka:29092')
+KAFKA_SERVER = os.getenv("KAFKA_SERVER", "kafka:29092")
+PRIM_TOKEN = os.getenv("PRIM_TOKEN")
 TOPIC = "paris-disruptions"
-PRIM_TOKEN = os.environ.get('PRIM_TOKEN')
+TRANSPORT_MODE = os.getenv("TRANSPORT_MODE", "metro").strip().lower()
 
+HEADERS = {"apikey": PRIM_TOKEN} if PRIM_TOKEN else {}
 
+# Traffic Info API endpoint you already use
+BASE_URL = "https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia/line_reports/physical_modes"
+
+WIPE_MODE = os.getenv("WIPE_MODE", "1").strip() == "1"
+
+# For disruptions we use PHYSICAL modes
+PHYSICAL_MODE_CANDIDATES = {
+    "metro": ["Metro"],
+    "bus": ["Bus"],
+    # RER may be RapidTransit and/or Train depending on coverage
+    "rer": ["RapidTransit", "Train"],
+}
 
 def clean_text(text):
-    """Removes HTML tags and cleans whitespace for better LLM processing."""
-    if not text: return ""
-    return text.replace("<br/>", " ").replace("<b>", "").replace("</b>", "").strip()
+    if not text:
+        return ""
+    return (
+        text.replace("<br/>", " ")
+            .replace("<b>", "")
+            .replace("</b>", "")
+            .replace("<p>", "")
+            .replace("</p>", "")
+            .strip()
+    )
+
+def fetch_line_reports(physical_mode: str):
+    url = f"{BASE_URL}/physical_mode:{physical_mode}/line_reports"
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def extract_title_and_description(disruption):
+    title = ""
+    description = ""
+    for message in disruption.get("messages", []):
+        channels = message.get("channel", {}).get("types", [])
+        if "title" in channels:
+            title = clean_text(message.get("text"))
+        elif "web" in channels:
+            description = clean_text(message.get("text"))
+    return title, description
 
 def run_producer():
-    p = Producer({'bootstrap.servers': KAFKA_SERVER})
-    
-    # 1. SEND WIPE SIGNAL FIRST
-    # This ensures your LLM only sees the latest "Actualité"
-    p.produce(TOPIC, value=json.dumps({"control": "CLEAR_ALERTS"}).encode('utf-8'))
-    p.flush()
+    if not PRIM_TOKEN:
+        raise RuntimeError("PRIM_TOKEN is missing. Put it in .env and restart.")
 
-    # 2. FETCH FROM API (Metro Only)
-    url = "https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia/line_reports/physical_modes/physical_mode:Metro/line_reports"
-    headers = {"apikey": PRIM_TOKEN}
-    params = {}#"count": 10} # Adjust as needed for testing
+    p = Producer({"bootstrap.servers": KAFKA_SERVER})
 
-    try:
-#         response_json=[
-#             {"id": "674cb69a-dccc-11f0-a301-0a58a9feac02", "status": "future", "period": {"begin": "20251231T160000", "end": "20260101T043000"}, "severity": "bloquante", 
-#                         "title": "Métro 12 / 8 : Mesures de sécurité - Arrêt non desservi", 
-#                         "description": "<p>Le 31 décembre à partir de 16:00, l'arrêt ne sera pas desservi à Concorde en raison de mesures de sécurité</p>", "updated_at": "2025-12-23T10:05:46.759776"},
-# {"id": "046fe3e0-dcc1-11f0-a301-0a58a9feac02", "status": "future", "period": {"begin": "20251231T160000", "end": "20260101T043000"}, "severity": "bloquante", 
-#  "title": "Métro 1 : Mesures de sécurité - Arrêts non desservis", 
-#  "description": "<p>Le 31 décembre à partir de 16:00, les arrêts ne seront pas desservis à Tuileries et Champs-Élysées – Clemenceau en raison de mesures de sécurité</p>", "updated_at": "2025-12-23T10:05:46.759787"},
-# {"id": "44613c6a-dcc6-11f0-ac5b-0a58a9feac02", "status": "future", "period": {"begin": "20260101T001000", "end": "20260101T051500"}, "severity": "bloquante", 
-#  "title": "Métro 2 : Mesures de sécurité - Arrêt non desservi", 
-#  "description": "<p>Le 31 décembre à partir de 00:10 l'arrêt ne sera pas desservi à Ternes en raison de mesures de sécurité</p>", "updated_at": "2025-12-23T10:05:46.759799"}
-# ]
-        
-        
-        
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        response_json = response.json()
-
-        disruptions_cleaned = []
-        # for disruption in response_json:
-        #     payload = json.dumps(disruption, ensure_ascii=False).encode('utf-8')
-        #     p.produce(TOPIC, key=disruption['id'], value=payload)
-        #     disruptions_cleaned.append(disruption)
-          
-            
-
-        # Navigate the Navitia structure: Reports -> Disruptions
-        for disruption in response_json.get("disruptions", []):
-            
-            # Filter for 'Actualité' tags as requested
-            if 'Actualité' in disruption.get('tags', []):
-                title = ""
-                description = ""
-                
-                # Extract text based on channel types
-                for message in disruption.get('messages', []):
-                    channels = message.get('channel', {}).get('types', [])
-                    if 'title' in channels:
-                        title = clean_text(message.get('text'))
-                    elif 'web' in channels:
-                        description = clean_text(message.get('text'))
-
-                # Build the LLM-optimized document
-                to_copy = {
-                    'id': disruption.get('id'),
-                    'status': disruption.get('status'),
-                    'period': disruption.get('application_periods', [{}])[0],
-                    'severity': disruption.get('severity', {}).get('name'),
-                    'title': title,
-                    'description': description,
-                    'updated_at': datetime.now().isoformat()
-                }
-                
-                # Push to Kafka immediately
-                # ensure_ascii=False is vital for the LLM to read French correctly
-                payload = json.dumps(to_copy, ensure_ascii=False).encode('utf-8')
-                p.produce(TOPIC, key=to_copy['id'], value=payload)
-                disruptions_cleaned.append(to_copy)
-
+    # wipe only this mode
+    if WIPE_MODE:
+        p.produce(TOPIC, value=json.dumps({"control": "CLEAR_ALERTS", "mode": TRANSPORT_MODE}).encode("utf-8"))
         p.flush()
-        print(f"✅ Successfully processed {len(disruptions_cleaned)} 'Actualité' alerts.")
 
-    except Exception as e:
-        print(f"❌ Producer Error: {e}")
+    physical_modes = PHYSICAL_MODE_CANDIDATES.get(TRANSPORT_MODE, PHYSICAL_MODE_CANDIDATES["metro"])
+    print(f"🔎 transport_mode={TRANSPORT_MODE} -> trying physical_modes={physical_modes}")
+
+    sent = 0
+    seen = set()
+
+    for pm in physical_modes:
+        try:
+            response_json = fetch_line_reports(pm)
+
+            for disruption in response_json.get("disruptions", []):
+                
+                if "Actualité" not in disruption.get("tags", []):
+                    continue
+
+                did = disruption.get("id")
+                if not did:
+                    continue
+
+                # de-dup if same disruption appears in both RapidTransit and Train
+                unique_key = f"{did}::{TRANSPORT_MODE}"
+                if unique_key in seen:
+                    continue
+                seen.add(unique_key)
+
+                title, description = extract_title_and_description(disruption)
+
+                doc = {
+                    "id": did,
+                    "mode": TRANSPORT_MODE,
+                    "physical_mode": pm,
+                    "status": disruption.get("status"),
+                    "period": (disruption.get("application_periods") or [{}])[0],
+                    "severity": (disruption.get("severity") or {}).get("name"),
+                    "title": title,
+                    "description": description,
+                    "updated_at": datetime.now().isoformat(),
+                }
+
+                p.produce(
+                    TOPIC,
+                    key=f"{doc['id']}::{doc['mode']}",
+                    value=json.dumps(doc, ensure_ascii=False).encode("utf-8"),
+                )
+                sent += 1
+
+            p.flush()
+            time.sleep(0.1)
+
+        except Exception as e:
+            print(f"⚠️ Fetch failed for physical_mode={pm}: {e}")
+
+    print(f"✅ Published {sent} disruptions for mode={TRANSPORT_MODE} using {physical_modes}")
 
 if __name__ == "__main__":
     run_producer()
