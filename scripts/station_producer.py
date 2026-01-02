@@ -1,123 +1,139 @@
-import time
-import json
 import os
+import json
+import time
 import requests
 from confluent_kafka import Producer
-from dotenv import load_dotenv
 
-load_dotenv()
+PRIM_TOKEN = (os.getenv("PRIM_TOKEN", "") or "").strip()
+PRIM_BASE = (os.getenv("PRIM_BASE", "https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia") or "").rstrip("/")
+KAFKA_SERVER = os.getenv("KAFKA_SERVER", "kafka:29092")
+TRANSPORT_MODE = (os.getenv("TRANSPORT_MODE", "metro") or "metro").strip().lower()
 
-api_key = os.getenv("PRIM_TOKEN")
-KAFKA_CONF = {'bootstrap.servers': os.environ.get('KAFKA_SERVER', 'kafka:29092')}
+SUPPORTED = {"metro", "bus", "rer"}
 
-def delivery_report(err, msg):
-    if err is not None:
-        print(f"❌ Delivery failed: {err}")
-    # We won't print success for every station to avoid flooding your console
+TOPICS = {
+    "metro": "idf.stations.metro",
+    "bus":   "idf.stations.bus",
+    "rer":   "idf.stations.rer",
+}
+
+# ✅ RER is fetched via these commercial modes (PRIM/Navitia side)
+COMMERCIAL_MODES = {
+    "metro": ["commercial_mode:Metro"],
+    "bus":   ["commercial_mode:Bus"],
+    "rer":   ["commercial_mode:RapidTransit", "commercial_mode:LocalTrain", "commercial_mode:RailShuttle", "commercial_mode:regionalRail"],
+}
+
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "idf-station-producer/1.0", "Accept": "application/json"})
 
 
+def _token_value():
+    if not PRIM_TOKEN:
+        raise RuntimeError("PRIM_TOKEN missing (check .env).")
+    t = PRIM_TOKEN.strip()
+    if t.lower().startswith("apikey "):
+        t = t.split(" ", 1)[1].strip()
+    return t
 
-def run_producer():
-    p = Producer(KAFKA_CONF)
-    topic = "paris-metro-stations"
-    
-    print(f"🚀 Producer started. Pushing whole batch to '{topic}'")
 
-    try:
+def prim_get(path: str, params=None, timeout=30):
+    url = f"{PRIM_BASE}/{path.lstrip('/')}"
+    token = _token_value()
 
-  
-        # 1. Fetch data from API
-        url = 'https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia/commercial_modes/commercial_mode:Metro/stop_areas'
-        headers = {"apikey": api_key}
-        params = {"count": 1000} 
-        
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        stations = data.get("stop_areas", [])
+    headers_try = [
+        {"apikey": token},
+        {"apiKey": token},
+        {"Authorization": f"Apikey {token}"},  # fallback
+    ]
+
+    last = None
+    for hdr in headers_try:
         try:
-            # stations = [
-            #         {"id": "stop_area:IDFM:71091", "name": "Vaugirard", "coord": {"lat": "48.840431", "lon": "2.300891"}},
-            #         {"id": "stop_area:IDFM:71117", "name": "Vavin", "coord": {"lat": "48.841888", "lon": "2.32926"}},
-            #         {"id": "stop_area:IDFM:71315", "name": "Victor Hugo", "coord": {"lat": "48.869747", "lon": "2.28527"}},
-            #         {"id": "stop_area:IDFM:478860", "name": "Villejuif - Gustave Roussy", "coord": {"lat": "48.793418", "lon": "2.349241"}},
-            #         {"id": "stop_area:IDFM:70143", "name": "Villejuif - Louis Aragon", "coord": {"lat": "48.787638", "lon": "2.366497"}},
-            #         {"id": "stop_area:IDFM:70375", "name": "Villejuif L\u00e9o Lagrange", "coord": {"lat": "48.805059", "lon": "2.363903"}},
-            #         {"id": "stop_area:IDFM:70248", "name": "Villejuif Paul Vaillant-Couturier", "coord": {"lat": "48.796283", "lon": "2.367631"}},
-            #         {"id": "stop_area:IDFM:71403", "name": "Villiers", "coord": {"lat": "48.881522", "lon": "2.315584"}},
-            #         {"id": "stop_area:IDFM:71113", "name": "Volontaires", "coord": {"lat": "48.841521", "lon": "2.308241"}},
-            #         {"id": "stop_area:IDFM:71750", "name": "Voltaire", "coord": {"lat": "48.858269", "lon": "2.379875"}},
-            #         {"id": "stop_area:IDFM:71423", "name": "Wagram", "coord": {"lat": "48.883487", "lon": "2.303995"}}
-            #     ]
-
-            if stations is None:
-                raise ValueError("No data fetched from API")
-            
-            # 1. SEND THE WIPE COMMAND FIRST
-            print("🧹 Sending wipe command to Sink...")
-            p.produce(topic, value=json.dumps({"control": "CLEAR_DATABASE"}).encode('utf-8'))
-            p.flush() # Ensure the wipe happens before the data arrives
-            
-            
-         
-            # for station in sta:
-            #     entry = {
-            #         "id": station["id"],
-            #         "name": station["name"],   
-            #     }
-            #         # produce() is ASYNCHRONOUS - it just adds to a local buffer
-                
-            #     p.produce(
-            #         topic, 
-            #         key=entry["id"], 
-            #         value=json.dumps(entry).encode('utf-8'),
-            #         callback=delivery_report
-            #     )
-            #     p.poll(0)
-            
-            
-            
-            
-
-            
-            print(f"Fetched {len(stations)} stations. Starting Kafka produce...")
-
-            # 2. Queue the entire batch
-            for station in stations:
-                entry = {
-                    "id": station["id"],
-                    "name": station["name"],
-                    "coord": {
-                        "lat": station["coord"]["lat"],
-                        "lon": station["coord"]["lon"]
-                    }
-                }
-                
-                # produce() is ASYNCHRONOUS - it just adds to a local buffer
-                p.produce(
-                    topic, 
-                    key=entry["id"], 
-                    value=json.dumps(entry).encode('utf-8'),
-                    callback=delivery_report
-                )
-                # Serve any pending delivery callbacks
-                p.poll(0)
-
-            # 3. FLUSH ONCE: This sends the whole buffer to Kafka in one go
-            print("Flushing batch to broker...")
-            p.flush()
-            print(f"Batch sent successfully at {time.strftime('%H:%M:%S')}")
-
+            r = SESSION.get(url, headers={**SESSION.headers, **hdr}, params=params or {}, timeout=timeout)
+            if r.status_code == 401:
+                last = Exception(f"401 Unauthorized (tried {list(hdr.keys())[0]})")
+                continue
+            r.raise_for_status()
+            return r.json()
         except Exception as e:
-            print(f"⚠️ Error during batch: {e}")
+            last = e
+    raise last
 
 
-    except KeyboardInterrupt:
-        print("Stopping producer...")
-    finally:
-        p.flush()
+def wait_kafka(prod: Producer, timeout_s=60):
+    t0 = time.time()
+    while True:
+        try:
+            md = prod.list_topics(timeout=5)
+            if md and md.brokers:
+                return
+        except Exception:
+            pass
+        if time.time() - t0 > timeout_s:
+            raise RuntimeError("Kafka not ready after timeout.")
+        time.sleep(2)
+
+
+def fetch_stop_areas(commercial_mode: str):
+    out = []
+    start_page = 0
+    while True:
+        data = prim_get(
+            f"commercial_modes/{commercial_mode}/stop_areas",
+            params={"count": 1000, "start_page": start_page}
+        )
+        sas = data.get("stop_areas", []) or []
+        out.extend(sas)
+        if len(sas) < 1000:
+            break
+        start_page += 1
+    return out
+
+
+def main():
+    if TRANSPORT_MODE not in SUPPORTED:
+        raise RuntimeError(f"Unsupported TRANSPORT_MODE={TRANSPORT_MODE}. Use metro, bus, rer.")
+
+    topic = TOPICS[TRANSPORT_MODE]
+    cms = COMMERCIAL_MODES[TRANSPORT_MODE]
+
+    prod = Producer({"bootstrap.servers": KAFKA_SERVER})
+    wait_kafka(prod)
+
+    print(f"🔎 transport_mode={TRANSPORT_MODE} -> trying commercial_modes={cms}")
+
+    published = 0
+    used = []
+
+    for cm in cms:
+        try:
+            sas = fetch_stop_areas(cm)
+            if not sas:
+                continue
+            used.append(cm)
+            for sa in sas:
+                msg = {
+                    "id": sa.get("id"),
+                    "name": sa.get("name"),
+                    "label": sa.get("label"),
+                    "mode": TRANSPORT_MODE,
+                    "embedded_type": "stop_area",
+                    "coord": sa.get("coord"),
+                    "city": (sa.get("administrative_regions") or [{}])[0].get("name") if sa.get("administrative_regions") else None,
+                }
+                prod.produce(topic, value=json.dumps(msg, ensure_ascii=False).encode("utf-8"))
+                published += 1
+            prod.flush()
+        except Exception as e:
+            print(f"⚠️ Fetch failed for commercial_mode={cm}: {e}")
+
+    if not used:
+        print("❌ No commercial_mode succeeded. Nothing published.")
+        return
+
+    print(f"✅ Published {published} stations for mode={TRANSPORT_MODE} using {used}")
+
 
 if __name__ == "__main__":
-    run_producer()
-    print("Exiting...")
-    exit(0)
+    main()

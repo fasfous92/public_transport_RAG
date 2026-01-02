@@ -1,178 +1,106 @@
 services:
-  # --- NEW: AGENT SERVICE (Gradio + LLM) ---
- 
-  paris-agent:
-    build: .
-    container_name: paris-agent
-    ports:
-      - "7860:7860"
-    depends_on:
-      - elasticsearch
-    working_dir: /app
-    volumes:
-      - .:/app
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.0
+    container_name: elasticsearch
     environment:
-      GRADIO_SERVER_NAME: "0.0.0.0"
-      PYTHONPATH: /app
-      PYTHONUNBUFFERED: "1"
-      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
-      PRIM_TOKEN: ${PRIM_TOKEN}
-      ELASTIC_SERVER: "http://elasticsearch:9200"
-      KAFKA_SERVER: "kafka:29092"
-    dns:
-      - 8.8.8.8
-    command: python agent.py
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 2048M
-
-  # --- SCHEDULER ---
-  scheduler:
-    image: mcuadros/ofelia:latest
-    container_name: scheduler
-    depends_on:
-      - kafka
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    command: daemon --docker
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     restart: unless-stopped
 
-  # --- KAFKA ---
   kafka:
     image: confluentinc/cp-kafka:latest
     container_name: kafka
-    restart: unless-stopped
     ports:
       - "9092:9092"
     environment:
       KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
-      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_LISTENERS: "PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
-    deploy:
-      resources:
-        limits:
-          cpus: '0.50'
-          memory: 1024M
-
-  # --- STATION PIPELINE ---
-  station-producer:
-    build: .
-    container_name: station-producer
-    profiles: [manual]
-    depends_on: 
-      - kafka
-    working_dir: /app
-    volumes: 
-      - .:/app
-    environment:
-      PYTHONPATH: /app
-      KAFKA_SERVER: "kafka:29092"
-      PRIM_TOKEN: ${PRIM_TOKEN}
-    command: python scripts/station_producer.py
+    restart: unless-stopped
 
   app-stations-sink:
     build: .
     container_name: app-stations-sink
-    depends_on: 
-      - kafka
-      - elasticsearch
-    working_dir: /app
-    volumes: 
-      - .:/app
-    environment:
-      PYTHONPATH: /app
-      KAFKA_SERVER: "kafka:29092"
-      ELASTIC_SERVER: "http://elasticsearch:9200"
-    command: python scripts/stations_sink.py
-
-  # --- ALERT PIPELINE ---
-  alert-producer:
-    build: .
-    container_name: alert-producer
-    profiles: [manual]
-    depends_on: 
-      - kafka
-    working_dir: /app
-    volumes: 
-      - .:/app
-    environment:
-      PYTHONPATH: /app
-      KAFKA_SERVER: "kafka:29092"
-      PRIM_TOKEN: ${PRIM_TOKEN}
-    command: python scripts/disturbance_producer.py
-
-  # --- FIX: app-alerts-sink (Strict Mapping) ---
-  app-alerts-sink:
-    build: .
-    container_name: app-alerts-sink
-    depends_on: 
-      - kafka
-      - elasticsearch
-    working_dir: /app
-    volumes: 
-      - .:/app
-    environment:
-      PYTHONPATH: /app
-      KAFKA_SERVER: "kafka:29092"
-      ELASTIC_SERVER: "http://elasticsearch:9200"
-      PYTHONUNBUFFERED: "1"
-      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
-      PRIM_TOKEN: ${PRIM_TOKEN}
-    command: python scripts/disturbance_sink.py
-
-  # --- ELASTICSEARCH ---
-  elasticsearch:
-      image: docker.elastic.co/elasticsearch/elasticsearch:8.10.0
-      container_name: elasticsearch
-      ports:
-        - "9200:9200"
-      volumes:
-        - es_data:/usr/share/elasticsearch/data 
-      # ES often prefers list syntax for Java opts
-      environment:
-        - discovery.type=single-node
-        - xpack.security.enabled=false
-        - "ES_JAVA_OPTS=-Xms512m -Xmx512m" 
-      deploy:
-        resources:
-          limits:
-            cpus: '0.50'
-            memory: 1024M
-
-  # --- GENERIC SINK ---
-  app:
-    build: . 
-    container_name: app-sink
     depends_on:
-      - kafka
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_started
     working_dir: /app
     volumes:
       - .:/app
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      KAFKA_SERVER: "kafka:29092"
+      ELASTIC_SERVER: "http://elasticsearch:9200"
+      STATIONS_INDEX: "idf-stations"
+      STATIONS_TOPICS: "idf.stations.metro,idf.stations.bus,idf.stations.rer"
+      KAFKA_GROUP_ID: "stations-sink-v3"
+      BULK_SIZE: "500"
+    command: python scripts/stations_sink.py
+    restart: unless-stopped
+
+  paris-agent:
+    build: .
+    container_name: paris-agent
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    working_dir: /app
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      GRADIO_SERVER_NAME: "0.0.0.0"
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      ELASTIC_SERVER: "http://elasticsearch:9200"
+      STATIONS_INDEX: "idf-stations"
+      KAFKA_SERVER: "kafka:29092"
+    ports:
+      - "7860:7860"
+    command: python agent.py
+    restart: unless-stopped
+
+  station-producer:
+    build: .
+    container_name: station-producer
+    profiles: ["manual"]
+    depends_on:
+      - kafka
+    working_dir: /app
+    volumes:
+      - .:/app
+    env_file: .env
     environment:
       PYTHONPATH: /app
       KAFKA_SERVER: "kafka:29092"
-      ELASTIC_SERVER: "http://elasticsearch:9200"
-      PYTHONUNBUFFERED: "1"
-    command: python scripts/stations_sink.py
-    deploy:
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 256M
+    command: python scripts/station_producer.py
 
 volumes:
   es_data:
