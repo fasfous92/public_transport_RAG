@@ -1,6 +1,6 @@
 
 
-# 🗼 RATP AI Agent (RAG + Tool Calling)
+# 🗼 Paris Metro AI Agent (RAG + Tool Calling)
 
 A containerized AI Assistant for Paris Public Transport. This application uses a Large Language Model (**Llama 3.1 405B**) equipped with real-time tools to plan itineraries, check traffic disruptions, and resolve station locations.
 
