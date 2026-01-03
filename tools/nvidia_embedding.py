@@ -1,39 +1,54 @@
 import os
 import requests
-import dotenv
+from functools import lru_cache
+from dotenv import load_dotenv
+
+load_dotenv()
+
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nv-embedqa-e5-v5")
+INVOKE_URL = "https://integrate.api.nvidia.com/v1/embeddings"
+
+SESSION = requests.Session()
 
 
+@lru_cache(maxsize=2048)
+def _cached_embedding(text: str, input_type: str):
+    return _raw_embedding(text, input_type)
 
-# --- CONFIG ---
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY") # Don't forget to set this!
-NVIDIA_MODEL = "nvidia/nv-embedqa-e5-v5" # Or "snowflake/arctic-embed-l"
 
-def get_nvidia_embedding(text, input_type="passage"):
-    """
-    Calls NVIDIA NIM API to get embeddings.
-    input_type: "passage" (for storing) or "query" (for searching)
-    """
-    if not text: return []
-    
-    invoke_url = "https://integrate.api.nvidia.com/v1/embeddings"
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    
+def _raw_embedding(text: str, input_type: str):
+    if not NVIDIA_API_KEY:
+        print("⚠️ Missing NVIDIA_API_KEY")
+        return []
+
     payload = {
         "input": [text],
         "model": NVIDIA_MODEL,
-        "input_type": input_type, 
-        "encoding_format": "float"
+        "input_type": input_type,  # "passage" or "query"
+        "encoding_format": "float",
+    }
+
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
     try:
-        response = requests.post(invoke_url, headers=headers, json=payload, timeout=5)
-        response.raise_for_status()
-        # Extract the vector
-        return response.json()['data'][0]['embedding']
+        r = SESSION.post(INVOKE_URL, headers=headers, json=payload, timeout=10)
+        r.raise_for_status()
+        return r.json()["data"][0]["embedding"]
     except Exception as e:
-        print(f"⚠️ NVIDIA API Error: {e}")
+        print(f"⚠️ NVIDIA embedding error: {e}")
         return []
+
+
+def get_nvidia_embedding(text: str, input_type: str = "passage"):
+    text = (text or "").strip()
+    if not text:
+        return []
+    # cache only short-ish content to avoid exploding RAM
+    if len(text) <= 2000:
+        return _cached_embedding(text, input_type)
+    return _raw_embedding(text, input_type)

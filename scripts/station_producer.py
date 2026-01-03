@@ -1,11 +1,28 @@
-import time
-import json
 import os
+import json
+import time
 import requests
 from confluent_kafka import Producer
-from dotenv import load_dotenv
 
-load_dotenv()
+PRIM_TOKEN = (os.getenv("PRIM_TOKEN", "") or "").strip()
+PRIM_BASE = (os.getenv("PRIM_BASE", "https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia") or "").rstrip("/")
+KAFKA_SERVER = os.getenv("KAFKA_SERVER", "kafka:29092")
+TRANSPORT_MODE = (os.getenv("TRANSPORT_MODE", "metro") or "metro").strip().lower()
+
+SUPPORTED = {"metro", "bus", "rer"}
+
+TOPICS = {
+    "metro": "idf.stations.metro",
+    "bus":   "idf.stations.bus",
+    "rer":   "idf.stations.rer",
+}
+
+# ✅ RER is fetched via these commercial modes (PRIM/Navitia side)
+COMMERCIAL_MODES = {
+    "metro": ["commercial_mode:Metro"],
+    "bus":   ["commercial_mode:Bus"],
+    "rer":   ["commercial_mode:RapidTransit", "commercial_mode:LocalTrain", "commercial_mode:RailShuttle", "commercial_mode:regionalRail"],
+}
 
 api_key = os.getenv("PRIM_TOKEN")
 KAFKA_CONF = {'bootstrap.servers': os.environ.get('KAFKA_SERVER', 'kafka:29092')}
@@ -15,11 +32,14 @@ MODES=[{'id': 'commercial_mode:Bus', 'name': 'Bus'},
        {'id': 'commercial_mode:Tramway', 'name': 'Tramway'},
 ]
 
-def delivery_report(err, msg):
-    if err is not None:
-        print(f"❌ Delivery failed: {err}")
-    # We won't print success for every station to avoid flooding your console
 
+def _token_value():
+    if not PRIM_TOKEN:
+        raise RuntimeError("PRIM_TOKEN missing (check .env).")
+    t = PRIM_TOKEN.strip()
+    if t.lower().startswith("apikey "):
+        t = t.split(" ", 1)[1].strip()
+    return t
 
 
 def run_producer():
@@ -135,6 +155,4 @@ def run_producer():
             p.flush()
 
 if __name__ == "__main__":
-    run_producer()
-    print("Exiting...")
-    exit(0)
+    main()

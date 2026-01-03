@@ -20,11 +20,47 @@ Modes = [
             {'id': 'physical_mode:Tramway','name': 'Tramway'}
         ]
 
+# Traffic Info API endpoint you already use
+BASE_URL = "https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia/line_reports/physical_modes"
+
+WIPE_MODE = os.getenv("WIPE_MODE", "1").strip() == "1"
+
+# For disruptions we use PHYSICAL modes
+PHYSICAL_MODE_CANDIDATES = {
+    "metro": ["Metro"],
+    "bus": ["Bus"],
+    # RER may be RapidTransit and/or Train depending on coverage
+    "rer": ["RapidTransit", "Train"],
+}
 
 def clean_text(text):
-    """Removes HTML tags and cleans whitespace for better LLM processing."""
-    if not text: return ""
-    return text.replace("<br/>", " ").replace("<b>", "").replace("</b>", "").strip()
+    if not text:
+        return ""
+    return (
+        text.replace("<br/>", " ")
+            .replace("<b>", "")
+            .replace("</b>", "")
+            .replace("<p>", "")
+            .replace("</p>", "")
+            .strip()
+    )
+
+def fetch_line_reports(physical_mode: str):
+    url = f"{BASE_URL}/physical_mode:{physical_mode}/line_reports"
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def extract_title_and_description(disruption):
+    title = ""
+    description = ""
+    for message in disruption.get("messages", []):
+        channels = message.get("channel", {}).get("types", [])
+        if "title" in channels:
+            title = clean_text(message.get("text"))
+        elif "web" in channels:
+            description = clean_text(message.get("text"))
+    return title, description
 
 def run_producer():
     

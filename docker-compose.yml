@@ -36,11 +36,14 @@ services:
     depends_on:
       - kafka
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    command: daemon --docker
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     restart: unless-stopped
 
-  # --- KAFKA ---
   kafka:
     image: confluentinc/cp-kafka:latest
     container_name: kafka
@@ -81,33 +84,48 @@ services:
   app-stations-sink:
     build: .
     container_name: app-stations-sink
-    depends_on: 
-      - kafka
-      - elasticsearch
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_started
     working_dir: /app
-    volumes: 
+    volumes:
       - .:/app
+    env_file: .env
     environment:
       PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
       KAFKA_SERVER: "kafka:29092"
       ELASTIC_SERVER: "http://elasticsearch:9200"
+      STATIONS_INDEX: "idf-stations"
+      STATIONS_TOPICS: "idf.stations.metro,idf.stations.bus,idf.stations.rer"
+      KAFKA_GROUP_ID: "stations-sink-v3"
+      BULK_SIZE: "500"
     command: python scripts/stations_sink.py
+    restart: unless-stopped
 
-  # --- ALERT PIPELINE ---
-  alert-producer:
+  paris-agent:
     build: .
     container_name: alert-producer
     profiles: [manual] # Keeps this manual unless you want it auto too
     depends_on: 
       - kafka
     working_dir: /app
-    volumes: 
+    volumes:
       - .:/app
+    env_file: .env
     environment:
+      GRADIO_SERVER_NAME: "0.0.0.0"
       PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      ELASTIC_SERVER: "http://elasticsearch:9200"
+      STATIONS_INDEX: "idf-stations"
       KAFKA_SERVER: "kafka:29092"
-      PRIM_TOKEN: ${PRIM_TOKEN}
-    command: python scripts/disturbance_producer.py
+    ports:
+      - "7860:7860"
+    command: python agent.py
+    restart: unless-stopped
 
   app-alerts-sink:
     build: .
@@ -151,21 +169,14 @@ services:
     container_name: app-sink
     depends_on:
       - kafka
-      - elasticsearch
     working_dir: /app
     volumes:
       - .:/app
+    env_file: .env
     environment:
       PYTHONPATH: /app
       KAFKA_SERVER: "kafka:29092"
-      ELASTIC_SERVER: "http://elasticsearch:9200"
-      PYTHONUNBUFFERED: "1"
-    command: python scripts/stations_sink.py
-    deploy:
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 256M
+    command: python scripts/station_producer.py
 
 volumes:
   es_data:

@@ -3,4 +3,4 @@ requests
 python-dotenv
 elasticsearch>=8.0.0,<9.0.0
 openai
-gradio>=4.0.0 
+gradio>=4.0.0

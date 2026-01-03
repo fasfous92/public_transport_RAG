@@ -1,150 +1,135 @@
 import os
-import json
+import re
+import unicodedata
 import gradio as gr
-from openai import OpenAI
-from tools.tools import get_disruption_context, get_station_id, get_itinerary
 
-# --- 1. CONFIGURATION ---
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.environ.get("NVIDIA_API_KEY")
-)
-MODEL_ID = "meta/llama-3.1-405b-instruct"
+from tools import get_station_id, get_itinerary, get_disruption_context
 
-# --- 2. DEFINE TOOLS ---
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_disruption_context",
-            "description": "Get real-time Paris Metro traffic updates.",
-            "parameters": {"type": "object", "properties": {"user_query": {"type": "string"}}, "required": ["user_query"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_station_id",
-            "description": "Resolves a fuzzy station name to its exact API ID.",
-            "parameters": {"type": "object", "properties": {"station_name": {"type": "string"}}, "required": ["station_name"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_itinerary",
-            "description": "Calculates the best route between two stations.",
-            "parameters": {
-                "type": "object", 
-                "properties": {"start_station": {"type": "string"}, "end_station": {"type": "string"}}, 
-                "required": ["start_station", "end_station"]
-            }
-        }
-    }
+
+def _norm(s: str) -> str:
+    s = (s or "").strip()
+    s = s.replace("’", "'").replace("–", "-").replace("—", "-")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _parse_itinerary(q: str):
+    raw = q.strip()
+
+    m = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+)$", raw, flags=re.I)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+
+    for sep in [" -> ", " => ", " to "]:
+        if sep in raw:
+            a, b = raw.split(sep, 1)
+            a, b = a.strip(), b.strip()
+            if a and b:
+                return a, b
+    return None, None
+
+
+def _parse_station_lookup(q: str):
+    m = re.search(r"(find\s+station|station)\s*:\s*(.+)$", q, flags=re.I)
+    if m:
+        return m.group(2).strip()
+    return None
+
+
+def _is_disruption(qn: str) -> bool:
+    return any(w in qn for w in ["disruption", "incident", "perturb", "probleme", "panne", "retard", "traffic"])
+
+
+def _is_station_lookup(qn: str) -> bool:
+    return ("find station" in qn) or qn.startswith("station:") or ("station :" in qn)
+
+
+def route(message: str) -> str:
+    q = (message or "").strip()
+    if not q:
+        return "Write a request (itinerary, disruptions, station lookup)."
+
+    qn = _norm(q)
+
+    # 1) station lookup
+    if _is_station_lookup(qn):
+        name = _parse_station_lookup(q) or q
+        return f"### Station lookup\n{get_station_id(name)}"
+
+    # 2) disruptions
+    if _is_disruption(qn):
+        return get_disruption_context(q)
+
+    # 3) itinerary
+    a, b = _parse_itinerary(q)
+    if a and b:
+        return get_itinerary(a, b)
+
+    # help
+    return (
+        "I can handle:\n"
+        "- **Itinerary**: `Gare de Lyon -> Châtelet` or `from Gare de Lyon to Châtelet`\n"
+        "- **Disruptions**: `Any disruption on Metro 14?` / `Any disruption on RER A?` / `Any disruption on bus?`\n"
+        "- **Station lookup**: `Find station: Nation`\n"
+        "\nSupported: Metro + Bus + RER. Not supported: Tram / TER."
+    )
+
+
+TITLE = "🚇🚌🚆 Île-de-France Metro + Bus + RER Agent"
+DESC = "Supported: Metro + Bus + RER. Not supported: Tram / TER."
+EXAMPLES = [
+    "Gare de Lyon -> Châtelet",
+    "Any disruption on Metro 14?",
+    "Any disruption on RER A?",
+    "Any disruption on bus?",
+    "Find station: Nation",
+    "Find station: Boulogne - Billancourt",
 ]
 
-# --- 3. HELPER: CONTENT SANITIZER (Required for API Stability) ---
-def sanitize_content(content):
-    """
-    Forces content to be a simple string.
-    Fixes the '400 Bad Request' error by flattening Gradio's list format.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join([
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ])
-    return str(content) if content else ""
 
-# --- 4. CORE LOGIC (Adapted strictly from your run_agent) ---
-def predict(message, history):
-    # A. Build Conversation History
-    # Using the EXACT system prompt from your working script
-    messages = [
-        {
-            "role": "system", 
-            "content": "You are a helpful public transport assistant. ALWAYS keep the same name for the transport means (Metro 1 is different from Line 1)"
-        }
-    ]
-    
-    # Add History (Sanitized)
-    for entry in history:
-        if isinstance(entry, list) or isinstance(entry, tuple):
-            # Old Format
-            messages.append({"role": "user", "content": sanitize_content(entry[0])})
-            messages.append({"role": "assistant", "content": sanitize_content(entry[1])})
-        elif isinstance(entry, dict):
-            # New Format
-            clean_content = sanitize_content(entry.get("content"))
-            messages.append({"role": entry.get("role"), "content": clean_content})
+with gr.Blocks() as demo:
+    gr.Markdown(f"# {TITLE}\n\n{DESC}\n\n**Try:**")
+    gr.Markdown("\n".join([f"- {e}" for e in EXAMPLES[:4]]))
 
-    # Add current message
-    messages.append({"role": "user", "content": sanitize_content(message)})
+    chatbot = gr.Chatbot(height=560)  # Gradio 6 expects messages dicts internally
+    state = gr.State([])  # we store a list of {"role","content"}
 
-    full_log = "" 
-    
-    # B. The Agent Loop (Your Logic)
-    while True:
-        # 1. Ask the Model
-        response = client.chat.completions.create(
-            model=MODEL_ID, messages=messages, tools=tools, tool_choice="auto"
-        )
-        msg = response.choices[0].message
-        
-        # 2. Display Reasoning (The "Think" block)
-        if msg.content:
-            full_log += f"\n{msg.content}\n"
-            yield full_log # Show progress to user
+    with gr.Row():
+        msg = gr.Textbox(placeholder="Type here… (e.g., Gare de Lyon -> Châtelet)", scale=8)
+        send = gr.Button("Send", scale=1)
+        clear = gr.Button("Clear", scale=1)
 
-        # 3. CHECK: Is the model finished? (No tool calls)
-        if not msg.tool_calls:
-            # Loop ends here naturally
-            break
-        
-        # 4. If tools ARE called, execute them
-        messages.append(msg) # Add request to history
-        
-        for tool_call in msg.tool_calls:
-            fn_name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-            
-            # Show tool usage in UI
-            full_log += f"\n🛠️ **Tool Request:** `{fn_name}`\n"
-            yield full_log
-            
-            # Execute Python Code
-            try:
-                if fn_name == "get_disruption_context":
-                    tool_result = get_disruption_context(args.get("user_query"))
-                elif fn_name == "get_station_id":
-                    tool_result = get_station_id(args.get("station_name"))
-                elif fn_name == "get_itinerary":
-                    tool_result = get_itinerary(args.get("start_station"), args.get("end_station"))
-                else:
-                    tool_result = f"Error: Tool '{fn_name}' not found."
-            except Exception as e:
-                tool_result = f"Error executing {fn_name}: {e}"
+    gr.Examples(examples=EXAMPLES, inputs=msg)
 
-            # Add Result to History
-            messages.append({
-                "tool_call_id": tool_call.id,
-                "role": "tool",
-                "name": fn_name,
-                "content": str(tool_result),
-            })
-            
-            full_log += f"✅ **Result:** Received.\n"
-            yield full_log
+    def respond(user_message, history):
+        history = history or []
+        # enforce messages format
+        if not isinstance(history, list):
+            history = []
+        history.append({"role": "user", "content": user_message})
 
-# --- 5. LAUNCH UI ---
-demo = gr.ChatInterface(
-    fn=predict,
-    title="🗼 Paris Metro AI Agent",
-    description="Ask for routes, traffic updates, or station info.",
-    examples=["Gare de Lyon to La Defense", "Traffic line 14"],
-)
+        try:
+            answer = route(user_message)
+        except Exception as e:
+            answer = f"Internal error: {str(e)}"
+
+        history.append({"role": "assistant", "content": answer})
+        return "", history, history
+
+    def do_clear():
+        return [], []
+
+    send.click(respond, inputs=[msg, state], outputs=[msg, chatbot, state])
+    msg.submit(respond, inputs=[msg, state], outputs=[msg, chatbot, state])
+    clear.click(do_clear, outputs=[chatbot, state])
+
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.queue()
+    demo.launch(
+        server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
+        server_port=int(os.getenv("PORT", "7860")),
+    )
