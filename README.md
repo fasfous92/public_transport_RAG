@@ -67,7 +67,6 @@ git clone <your-repo-url>
 cd public_transport_RAG
 
 ```
-Here is a polished, professional version for your `README.md`. I have improved the structure, clarity, and formatting while keeping all the technical details accurate.
 
 ---
 
